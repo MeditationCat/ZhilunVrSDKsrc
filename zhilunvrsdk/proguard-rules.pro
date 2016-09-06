@@ -29,9 +29,9 @@
 -keep class com.zhitech.zhilunvrsdk.Utils.**{*;}
 
 -keepnames class * implements java.io.Serializable  #保持 Serializable 不被混淆
-#-keepclasseswithmembernames class * {  # 保持 native 方法不被混淆
-#    native <methods>;
-#}
+-keepclasseswithmembernames class * {  # 保持 native 方法不被混淆
+    native <methods>;
+}
 -keep class * implements android.os.Parcelable { # 保持 Parcelable 不被混淆
     public static final android.os.Parcelable$Creator *;
 }

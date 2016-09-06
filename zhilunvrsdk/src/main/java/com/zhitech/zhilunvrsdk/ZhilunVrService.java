@@ -50,7 +50,6 @@ public class ZhilunVrService extends Service {
     private static int mProductId = 0; //0x1001; //4097;
 
     private int mCommandTemp = -1;
-    private boolean mWaitingPermission = false;
     private UsbManager usbManager;
     private UsbDevice usbDevice;
     private List<UsbInterface> usbInterfaceList;
@@ -95,6 +94,8 @@ public class ZhilunVrService extends Service {
         filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         registerReceiver(mUsbReceiver, filter);
+        SendCommandLooperThread = new MyLooperThread();
+        SendCommandLooperThread.start();
     }
 
     @Override
@@ -268,32 +269,31 @@ public class ZhilunVrService extends Service {
             synchronized (this) {
                 if (ACTION_USB_PERMISSION.equals(action)) {
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                        Utils.dLog(TAG, "extra permission is granted for device: " + device);
-                        if (device != null) {
-                            openTargetDevice(usbInterface);
-                            mWaitingPermission = false;
-                            if (mCommandTemp != -1) {
-                                SendCommand(mCommandTemp);
-                                mCommandTemp = -1;
-                            }
+                        Utils.dLog(TAG, String.format(Locale.US, "extra permission is granted for device[pid:%d, vid:%d]",
+                                device.getProductId(), device.getVendorId()));
+                        if (device.equals(usbDevice)) {
+                            openTargetDevice(device);
                         }
                     } else {
-                        Utils.dLog(TAG, "permission is denied for device " + device);
+                        Utils.dLog(TAG, String.format(Locale.US, "permission is denied for device[pid:%d, vid:%d]",
+                                device.getProductId(), device.getVendorId()));
                     }
                 } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
-                    if (device != null && device.getVendorId() == mVendorId && device.getProductId() == mProductId) {
+                    if (device != null && device.equals(usbDevice)) {
                         Utils.dLog(TAG, "connectToDevice()!");
                         connectToDevice();
                     }
                 } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
                     Utils.dLog(TAG, "close the device connection!");
                     try {
-                        if (device != null && device.getVendorId() == mVendorId && device.getProductId() == mProductId) {
+                        if (device != null && device.equals(usbDevice)) {
                             if (usbConn != null) {
                                 usbConn.releaseInterface(usbInterface);
                                 usbConn.close();
                             }
                             initConnection();
+                            mIPacketDataCallbackList.kill();
+                            mICommandResultCallbackList.kill();
                             //go to main activity
                             if (mainActivityClassName != null) {
                                 Intent mainActivity = new Intent();
@@ -314,6 +314,7 @@ public class ZhilunVrService extends Service {
     };
 
     private void startServiceListenerThread() {
+        runningFlag = true;
         if (PacketDataListenerThread == null) {
             PacketDataListenerThread = new Thread(new PacketDataListenerRunnable(), "PacketDataListenerThread");
             PacketDataListenerThread.start();
@@ -322,28 +323,20 @@ public class ZhilunVrService extends Service {
             CommandResultListenerThread = new Thread(new CommandResultListenerRunnable(), "CommandResultListenerThread");
             CommandResultListenerThread.start();
         }
-        if (SendCommandLooperThread == null) {
-            SendCommandLooperThread = new MyLooperThread();
-            SendCommandLooperThread.start();
-        }
     }
 
     public void restartServiceListenerThread() {
+        runningFlag = true;
         if (PacketDataListenerThread != null) {
             PacketDataListenerThread.interrupt();
         }
         if (CommandResultListenerThread != null) {
             CommandResultListenerThread.interrupt();
         }
-        if (SendCommandLooperThread != null) {
-            SendCommandLooperThread.interrupt();
-        }
         PacketDataListenerThread = new Thread(new PacketDataListenerRunnable(), "PacketDataListenerThread");
         CommandResultListenerThread = new Thread(new CommandResultListenerRunnable(), "CommandResultListenerThread");
-        SendCommandLooperThread = new MyLooperThread();
         PacketDataListenerThread.start();
         CommandResultListenerThread.start();
-        SendCommandLooperThread.start();
     }
 
     public boolean checkServiceListenerThreadIsRunnig() {
@@ -365,7 +358,6 @@ public class ZhilunVrService extends Service {
         }
         EPCTRL = null;
         usbConn = null;
-        mWaitingPermission = false;
     }
 
     private void enumerateDevice(Context context, int resourceId) {
@@ -396,7 +388,8 @@ public class ZhilunVrService extends Service {
                 HashMap<String, UsbDevice> deviceList = usbManager.getDeviceList();
                 if (!(deviceList.isEmpty())) {
                     for (UsbDevice device : deviceList.values()) {
-                        Utils.dLog(TAG, device.toString());
+                        Utils.dLog(TAG, String.format(Locale.US, "device[pid:%d, vid:%d]",
+                                device.getProductId(), device.getVendorId()));
                         if (device.getVendorId() == mVendorId && device.getProductId() == mProductId) {
                             usbDevice = device;
                         }
@@ -481,13 +474,12 @@ public class ZhilunVrService extends Service {
     }
 
     private boolean checkDevicePermission(UsbDevice mUsbDevice) {
-        if (mUsbDevice != null) {
+        if (mUsbDevice != null && usbManager != null) {
             try {
                 if (usbManager.hasPermission(mUsbDevice)) {
                     return true;
                 } else {
-                    mWaitingPermission = true;
-                    usbManager.requestPermission(usbDevice, pendingIntent);
+                    usbManager.requestPermission(mUsbDevice, pendingIntent);
                     return false;
                 }
             } catch (Exception e) {
@@ -497,35 +489,36 @@ public class ZhilunVrService extends Service {
         return false;
     }
 
-    private boolean openTargetDevice(UsbInterface mInterface) {
-        boolean openResult = false;
-        if (mInterface != null) {
-            try {
-                if (checkDevicePermission(usbDevice)) {
-                    usbConn = usbManager.openDevice(usbDevice);
-                } else {
-                    return false;
-                }
-                if (usbConn != null) {
-                    openResult = usbConn.claimInterface(mInterface, true);
-                    Utils.dLog(TAG, "usbConn.getSerial(): " + usbConn.getSerial());
-                } else {
-                    Utils.dLog(TAG, "usbConn = null!");
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
+    private void openTargetDevice(UsbDevice mUsbDevice) {
+        try {
+            if (usbConn == null) {
+                usbConn = usbManager.openDevice(mUsbDevice);
             }
+            if (usbConn != null) {
+                if (usbInterface != null) {
+                    boolean openResult = usbConn.claimInterface(usbInterface, true);
+                    Utils.dLog(TAG, String.format(Locale.US, "openResult:%b, usbConn.getSerial():%s ",openResult,  usbConn.getSerial()));
+                    if (openResult) {
+                        if (mCommandTemp != -1) {
+                            SendCommand(mCommandTemp);
+                            mCommandTemp = -1;
+                        }
+                    }
+                } else {
+                    Utils.dLog(TAG, "usbInterface = null!");
+                }
+            } else {
+                Utils.dLog(TAG, "usbConn = null!");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
         }
-        return openResult;
     }
 
     public void connectToDevice() {
+        Utils.dLog(TAG);
         if (deviceIsOpened()) {
             Utils.dLog(TAG, "device has been already connected!");
-            return;
-        }
-        if (mWaitingPermission) {
-            Utils.dLog(TAG, "device is waiting permission!");
             return;
         }
         try {
@@ -538,7 +531,7 @@ public class ZhilunVrService extends Service {
             }
             assignEndpoint(usbInterfaceList);
             if (checkDevicePermission(usbDevice)) {
-                openTargetDevice(usbInterface);
+                openTargetDevice(usbDevice);
             }
         } catch (Exception e) {
             e.printStackTrace();
